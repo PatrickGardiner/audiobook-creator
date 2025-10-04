@@ -198,6 +198,122 @@ async def generate_audiobook_wrapper(voice_type, narrator_gender, output_format,
         yield None, None
         return
 
+async def retry_audiobook_assembly_wrapper(output_format, narrator_gender, book_file, force_cleanup):
+    """Wrapper for retry audiobook assembly with validation and progress updates"""
+    
+    # Check if we can resume from assembly
+    try:
+        from utils.recovery_utils import can_resume_from_assembly
+        from retry_audiobook_assembly import retry_assembly
+        
+        temp_dir = "temp_audio"
+        temp_line_audio_dir = os.path.join(temp_dir, "line_segments")
+        
+        can_resume, checkpoint_data = can_resume_from_assembly(temp_dir, temp_line_audio_dir)
+        
+        if not can_resume:
+            yield gr.Warning("❌ Cannot retry assembly: Missing line segments or recovery data. You need to run the full generation process first to create line segments.")
+            yield None
+            return
+            
+        yield gr.Info(f"✅ Recovery data found! Found {checkpoint_data['total_lines']} line segments and {len(checkpoint_data['chapter_files'])} chapters to assemble.")
+        
+        # Determine if we're generating M4B format
+        generate_m4b = output_format == "M4B (Chapters & Cover)"
+        book_path = None
+        
+        if generate_m4b and book_file:
+            book_path = book_file.name if hasattr(book_file, 'name') else str(book_file)
+        
+        # Start the retry process
+        yield gr.Info("🚀 Starting assembly retry process...")
+        
+        # Map the output format properly
+        if generate_m4b:
+            format_for_retry = "m4b"
+        else:
+            format_for_retry = output_format.lower().replace(" (chapters & cover)", "")
+        
+        exit_code = await retry_assembly(
+            temp_dir=temp_dir,
+            output_format=format_for_retry,
+            narrator_gender=narrator_gender,
+            book_path=book_path,
+            generate_m4b=generate_m4b,
+            add_emotion_tags=False,  # This should be detected from existing data
+            force_cleanup=force_cleanup
+        )
+        
+        if exit_code == 0:
+            yield gr.Info("🎉 Assembly retry completed successfully! Check the generated_audiobooks folder for your audiobook.", duration=10)
+            yield f"Assembly retry completed successfully! Audiobook generated in {output_format} format."
+        else:
+            yield gr.Warning("❌ Assembly retry failed. Check the console for error details.")
+            yield "Assembly retry failed. Please check the error messages above."
+            
+    except Exception as e:
+        print(f"Error in retry assembly: {e}")
+        import traceback
+        traceback.print_exc()
+        yield gr.Warning(f"Error during retry assembly: {str(e)}")
+        yield None
+
+def check_recovery_status_wrapper():
+    """Check and display recovery status"""
+    try:
+        from utils.recovery_utils import can_resume_from_assembly
+        import os
+        
+        temp_dir = "temp_audio"
+        temp_line_audio_dir = os.path.join(temp_dir, "line_segments")
+        
+        status_info = []
+        
+        # Check line segments
+        if os.path.exists(temp_line_audio_dir):
+            line_files = [f for f in os.listdir(temp_line_audio_dir) if f.startswith('line_') and f.endswith('.wav')]
+            status_info.append(f"📁 Line segments found: {len(line_files)}")
+        else:
+            status_info.append("❌ Line segments directory not found")
+            return "\n".join(status_info)
+        
+        # Check checkpoint
+        checkpoint_file = os.path.join(temp_dir, "recovery_checkpoint.json")
+        if os.path.exists(checkpoint_file):
+            status_info.append("✅ Recovery checkpoint found")
+            
+            try:
+                import json
+                with open(checkpoint_file, 'r') as f:
+                    checkpoint = json.load(f)
+                status_info.append(f"📊 Total lines: {checkpoint.get('total_lines', 'Unknown')}")
+                status_info.append(f"📚 Chapters: {len(checkpoint.get('chapter_files', []))}")
+            except Exception as e:
+                status_info.append(f"⚠️ Could not read checkpoint details: {e}")
+        else:
+            status_info.append("❌ Recovery checkpoint not found")
+            return "\n".join(status_info)
+        
+        # Check existing chapter files
+        if os.path.exists(temp_dir):
+            chapter_files = [f for f in os.listdir(temp_dir) if f.endswith('.wav') and not f.startswith('line_')]
+            if chapter_files:
+                status_info.append(f"🎯 Existing chapter files: {len(chapter_files)}")
+            else:
+                status_info.append("📝 No existing chapter files found")
+        
+        # Final assessment
+        can_resume, _ = can_resume_from_assembly(temp_dir, temp_line_audio_dir)
+        if can_resume:
+            status_info.append("\n🚀 Ready for retry assembly!")
+        else:
+            status_info.append("\n❌ Cannot resume - missing required files")
+        
+        return "\n".join(status_info)
+        
+    except Exception as e:
+        return f"Error checking recovery status: {str(e)}"
+
 def update_emotion_tags_status_and_state():
     """Update the emotion tags status display and set session state after processing"""
     # Return both the updated status display and set session state to True
@@ -378,6 +494,54 @@ with gr.Blocks(css=css, theme=gr.themes.Default()) as gradio_app:
                     interactive=False,
                     type="filepath"
                 )
+
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown('<div class="step-heading">🔄 Step 5: Retry Assembly (Recovery)</div>')
+            
+            with gr.Accordion("When to Use Retry Assembly", open=False):
+                gr.Markdown("""
+                **Use this feature when:**
+                * Audiobook generation failed during the final assembly phase
+                * You want to change the output format without regenerating audio
+                * FFmpeg assembly was interrupted but line segments exist
+                * You want to clean up partial chapter files and retry
+                
+                **This will NOT work if:**
+                * No line segments were generated yet (need to run full generation first)
+                * Line segments were deleted or corrupted
+                """)
+            
+            check_recovery_btn = gr.Button("Check Recovery Status", variant="secondary", size="sm")
+            
+            with gr.Row():
+                retry_output_format = gr.Dropdown(
+                    ["M4B (Chapters & Cover)", "AAC", "M4A", "MP3", "WAV", "OPUS", "FLAC", "PCM"], 
+                    label="Retry Output Format",
+                    value="M4B (Chapters & Cover)",
+                    info="Format for the retry assembly"
+                )
+                
+                retry_narrator_gender = gr.Radio(
+                    ["male", "female"], 
+                    label="Narrator Gender for Retry",
+                    value="female"
+                )
+                
+                retry_force_cleanup = gr.Checkbox(
+                    label="Force Cleanup",
+                    value=False,
+                    info="Clean up existing partial chapter files before retry"
+                )
+            
+            retry_assembly_btn = gr.Button("Retry Assembly", variant="secondary")
+            
+            retry_output = gr.Textbox(
+                label="Retry Assembly Progress", 
+                placeholder="Retry assembly progress will be shown here",
+                interactive=False,
+                lines=3
+            )
     
     # Connections with proper handling of Gradio notifications
     validate_btn.click(
@@ -430,6 +594,21 @@ with gr.Blocks(css=css, theme=gr.themes.Default()) as gradio_app:
         lambda x: gr.update(visible=True) if x is not None else gr.update(visible=False),
         inputs=[audiobook_file],
         outputs=[download_box]
+    )
+    
+    # Check recovery status button connection
+    check_recovery_btn.click(
+        check_recovery_status_wrapper,
+        inputs=[],
+        outputs=[retry_output]
+    )
+    
+    # Retry assembly button connection
+    retry_assembly_btn.click(
+        retry_audiobook_assembly_wrapper, 
+        inputs=[retry_output_format, retry_narrator_gender, book_input, retry_force_cleanup], 
+        outputs=[retry_output],
+        queue=True
     )
     
     # Navigation button functionality for textbox scrolling

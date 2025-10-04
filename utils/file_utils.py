@@ -21,6 +21,30 @@ import json
 import shutil
 import traceback
 
+def sanitize_filename(text):
+    """
+    Sanitize a text string to make it safe for use as a filename.
+    
+    Args:
+        text (str): The text to sanitize
+        
+    Returns:
+        str: A sanitized string safe for use as a filename
+    """
+    # Remove or replace problematic characters
+    text = text.replace("'", '').replace('"', '').replace('/', ' ').replace('.', ' ')
+    text = text.replace(':', '').replace('?', '').replace('\\', '').replace('|', '')
+    text = text.replace('*', '').replace('<', '').replace('>', '').replace('&', 'and')
+    text = text.replace(',', '').replace(';', '').replace('!', '').replace('@', '')
+    text = text.replace('#', '').replace('$', '').replace('%', '').replace('^', '')
+    text = text.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
+    text = text.replace('{', '').replace('}', '').replace('=', '').replace('+', '')
+    
+    # Normalize whitespace and trim
+    text = ' '.join(text.split())
+    
+    return text
+
 def empty_file(file_name):
     # Open the file in write mode to make it empty
     with open(file_name, 'w', encoding='utf-8') as file:

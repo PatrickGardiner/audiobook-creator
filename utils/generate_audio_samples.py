@@ -28,6 +28,16 @@ load_dotenv()
 TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://localhost:8880/v1")
 TTS_API_KEY = os.environ.get("TTS_API_KEY", "not-needed")
 TTS_MODEL = os.environ.get("TTS_MODEL", "kokoro")
+TTS_LANGUAGE = os.environ.get("TTS_LANGUAGE", "en")
+
+def get_kokoro_lang_code(standard_lang_code: str) -> str:
+    """Maps standard language codes to Kokoro-specific language codes."""
+    kokoro_lang_map = {
+        'en': 'a', 'en-us': 'a', 'en-gb': 'b', 'es': 'e', 'fr': 'f',
+        'hi': 'h', 'it': 'i', 'ja': 'j', 'pt': 'p', 'pt-br': 'p',
+        'zh': 'z', 'zh-cn': 'z'
+    }
+    return kokoro_lang_map.get(standard_lang_code.lower(), 'a')
 
 os.makedirs("audio_samples", exist_ok=True)
 
@@ -67,28 +77,34 @@ gen_for_all_combinations = gen_for_all_combinations.strip().lower()
 if(gen_for_all_combinations == "yes"):
     with tqdm(total=len(all_voices_combinations), unit="line", desc="Audio Generation Progress") as overall_pbar:
         for voice in all_voices_combinations:
-            with client.audio.speech.with_streaming_response.create(
-                model=TTS_MODEL,
-                voice=voice,
-                response_format="wav",  # Changed to WAV for consistency
-                speed=0.85,
-                input=text,
-                timeout=600
-            ) as response:
+            # Build request parameters - language determined by voice selection
+            request_params = {
+                "model": TTS_MODEL,
+                "voice": voice,
+                "response_format": "wav",
+                "speed": 0.85,
+                "input": text,
+                "timeout": 600
+            }
+            
+            with client.audio.speech.with_streaming_response.create(**request_params) as response:
                 file_path = f"audio_samples/{voice}.wav"
                 response.stream_to_file(file_path)
             overall_pbar.update(1)
 else:
     with tqdm(total=len(voices), unit="line", desc="Audio Generation Progress") as overall_pbar:
         for voice in voices:
-            with client.audio.speech.with_streaming_response.create(
-                model=TTS_MODEL,
-                voice=voice,
-                response_format="wav",  # Changed to WAV for consistency
-                speed=0.85,
-                input=text,
-                timeout=600
-            ) as response:
+            # Build request parameters - language determined by voice selection
+            request_params = {
+                "model": TTS_MODEL,
+                "voice": voice,
+                "response_format": "wav",
+                "speed": 0.85,
+                "input": text,
+                "timeout": 600
+            }
+            
+            with client.audio.speech.with_streaming_response.create(**request_params) as response:
                 file_path = f"audio_samples/{voice}_test.wav"
                 response.stream_to_file(file_path)
             overall_pbar.update(1)

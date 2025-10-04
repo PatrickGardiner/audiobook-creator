@@ -42,7 +42,28 @@ load_dotenv()
 TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://localhost:8880/v1")
 TTS_API_KEY = os.environ.get("TTS_API_KEY", "not-needed")
 TTS_MODEL = os.environ.get("TTS_MODEL", "kokoro")
+TTS_LANGUAGE = os.environ.get("TTS_LANGUAGE", "en")  # Default to English, use 'es' for Spanish
 TTS_MAX_PARALLEL_REQUESTS_BATCH_SIZE = int(os.environ.get("TTS_MAX_PARALLEL_REQUESTS_BATCH_SIZE", 1))
+
+def get_tts_lang_code(tts_model: str, lang_code: str) -> str:
+    """
+    Returns appropriate language code for the TTS engine.
+    
+    Args:
+        tts_model (str): TTS model ('kokoro' or 'orpheus')
+        lang_code (str): Language code from TTS_LANGUAGE environment variable
+        
+    Returns:
+        str: Language code formatted for the specific TTS engine
+    """
+    if tts_model == "kokoro":
+        # For Kokoro, use the lang_code directly (should already be in Kokoro format)
+        # Validate it's a known Kokoro code, default to 'a' if not
+        valid_kokoro_codes = ['a', 'b', 'e', 'f', 'h', 'i', 'j', 'p', 'z']
+        return lang_code if lang_code in valid_kokoro_codes else 'a'
+    else:
+        # For Orpheus and other engines, use standard language codes
+        return lang_code
 
 os.makedirs("audio_samples", exist_ok=True)
 os.makedirs("generated_audiobooks", exist_ok=True)
@@ -56,6 +77,10 @@ def sanitize_filename(text):
     text = text.replace("'", '').replace('"', '').replace('/', ' ').replace('.', ' ')
     text = text.replace(':', '').replace('?', '').replace('\\', '').replace('|', '')
     text = text.replace('*', '').replace('<', '').replace('>', '').replace('&', 'and')
+    text = text.replace(',', '').replace(';', '').replace('!', '').replace('@', '')
+    text = text.replace('#', '').replace('$', '').replace('%', '').replace('^', '')
+    text = text.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
+    text = text.replace('{', '').replace('}', '').replace('=', '').replace('+', '')
     
     # Normalize whitespace and trim
     text = ' '.join(text.split())
@@ -131,7 +156,7 @@ def check_if_chapter_heading(text):
             return False  # Invalid number format
     return False  # No match
     
-def find_voice_for_gender_score(character: str, character_gender_map, engine_name: str, narrator_gender: str):
+def find_voice_for_gender_score(character: str, character_gender_map, engine_name: str, narrator_gender: str, language: str = "en"):
     """
     Finds the appropriate voice for a character based on their gender score using the new voice mapping system.
 
@@ -144,6 +169,7 @@ def find_voice_for_gender_score(character: str, character_gender_map, engine_nam
         character_gender_map (dict): A dictionary mapping character names to their gender scores.
         engine_name (str): The TTS engine name ("kokoro" or "orpheus").
         narrator_gender (str): User's narrator gender preference ("male" or "female").
+        language (str): Language code ("en" for English, "es" for Spanish, etc.).
 
     Returns:
         str: The voice identifier that matches the character's gender score.
@@ -151,17 +177,17 @@ def find_voice_for_gender_score(character: str, character_gender_map, engine_nam
 
     # Handle narrator character specially
     if character.lower() == "narrator":
-        return get_narrator_voice_for_character(engine_name, narrator_gender)
+        return get_narrator_voice_for_character(engine_name, narrator_gender, language)
 
     # Get the character's gender score
     if "scores" in character_gender_map and character.lower() in character_gender_map["scores"]:
         character_info = character_gender_map["scores"][character.lower()]
         character_gender_score = character_info["gender_score"]
         
-        return get_voice_for_character_score(engine_name, narrator_gender, character_gender_score)
+        return get_voice_for_character_score(engine_name, narrator_gender, character_gender_score, language)
     else:
         # Fallback for unknown characters - use score 5 (neutral)
-        return get_voice_for_character_score(engine_name, narrator_gender, 5)
+        return get_voice_for_character_score(engine_name, narrator_gender, 5, language)
 
 def validate_book_for_m4b_generation(book_path):
     """
@@ -258,10 +284,11 @@ async def generate_audio_with_single_voice(output_format, narrator_gender, gener
     # Filter out empty lines
     lines = [line.strip() for line in lines if line.strip()]
     
-    # Set the voices to be used - now using the new voice mapping system
+    # Set the voices to be used - now using the new voice mapping system with language support
     narrator_voice, dialogue_voice = get_narrator_and_dialogue_voices(
         engine_name=TTS_MODEL, 
-        narrator_gender=narrator_gender
+        narrator_gender=narrator_gender,
+        language=TTS_LANGUAGE
     )
 
     # Setup directories
@@ -321,12 +348,14 @@ async def generate_audio_with_single_voice(output_format, narrator_gender, gener
                 temp_file.close()
                 
                 try:
-                    # Generate audio for the part using retry mechanism
+                    # Generate audio for the part using retry mechanism with language support
+                    lang_code = get_tts_lang_code(TTS_MODEL, TTS_LANGUAGE)
                     audio_buffer = await generate_audio_with_retry(
                         async_openai_client, 
                         TTS_MODEL,
                         text_to_speak, 
-                        voice_to_speak_in
+                        voice_to_speak_in,
+                        lang_code if TTS_MODEL == "kokoro" else None
                     )
                     
                     # Write part audio to temp file
@@ -557,6 +586,37 @@ async def generate_audio_with_multiple_voices(output_format, narrator_gender, ge
             
         yield f"✅ Book validation successful! Title: {metadata.get('Title', 'Unknown')}, Author: {metadata.get('Author(s)', 'Unknown')}"
     
+    # Check for recovery scenario first
+    temp_audio_dir = "temp_audio"
+    temp_line_audio_dir = os.path.join(temp_audio_dir, "line_segments")
+    
+    try:
+        from utils.recovery_utils import can_resume_from_assembly, resume_from_assembly_phase, assembly_and_post_processing_phase
+        can_resume, checkpoint_data = can_resume_from_assembly(temp_audio_dir, temp_line_audio_dir)
+        
+        if can_resume:
+            yield "🔄 **Recovery Mode Activated**: Found existing line segments and checkpoint"
+            yield "⏭️ Skipping line generation phase, resuming from assembly..."
+            
+            # Resume from assembly phase
+            chapter_files, chapter_line_map = resume_from_assembly_phase(
+                temp_audio_dir, temp_line_audio_dir, checkpoint_data
+            )
+            
+            # Continue with assembly and post-processing only
+            async for result in assembly_and_post_processing_phase(
+                chapter_files, chapter_line_map, temp_audio_dir, temp_line_audio_dir,
+                output_format, narrator_gender, generate_m4b_audiobook_file, book_path, add_emotion_tags
+            ):
+                yield result
+            return
+            
+    except ImportError:
+        yield "Warning: Recovery utilities not available, proceeding with full generation"
+    except Exception as e:
+        yield f"Warning: Recovery check failed ({e}), proceeding with full generation"
+    
+    # Normal generation path starts here
     file_path = 'speaker_attributed_book.jsonl'
     json_data_array = []
 
@@ -608,7 +668,7 @@ async def generate_audio_with_multiple_voices(output_format, narrator_gender, ge
     character_gender_map = read_json("character_gender_map.json")
 
     # Get narrator voice using the new voice mapping system
-    narrator_voice = find_voice_for_gender_score("narrator", character_gender_map, TTS_MODEL, narrator_gender)
+    narrator_voice = find_voice_for_gender_score("narrator", character_gender_map, TTS_MODEL, narrator_gender, TTS_LANGUAGE)
     yield "Loaded voice mappings and selected narrator voice"
     
     # Setup directories
@@ -653,7 +713,7 @@ async def generate_audio_with_multiple_voices(output_format, narrator_gender, ge
                 return None
 
             speaker = doc["speaker"]
-            speaker_voice = find_voice_for_gender_score(speaker, character_gender_map, TTS_MODEL, narrator_gender)
+            speaker_voice = find_voice_for_gender_score(speaker, character_gender_map, TTS_MODEL, narrator_gender, TTS_LANGUAGE)
             
             # Split the line into annotated parts
             annotated_parts = split_and_annotate_text(line)
@@ -676,6 +736,7 @@ async def generate_audio_with_multiple_voices(output_format, narrator_gender, ge
                 
                 try:
                     # Generate audio for the part using retry mechanism
+                    # Language is determined by voice selection for Kokoro TTS server
                     audio_buffer = await generate_audio_with_retry(
                         async_openai_client, 
                         TTS_MODEL,
@@ -781,6 +842,14 @@ async def generate_audio_with_multiple_voices(output_format, narrator_gender, ge
     
     chapter_organization_bar.close()
     yield f"Organized {len(results)} lines into {len(chapter_files)} chapters"
+    
+    # Create recovery checkpoint after organization phase
+    try:
+        from utils.recovery_utils import create_recovery_checkpoint
+        create_recovery_checkpoint(temp_audio_dir, chapter_line_map, chapter_files, results)
+        yield "Recovery checkpoint created - can resume from this point if needed"
+    except Exception as e:
+        yield f"Warning: Could not create recovery checkpoint: {e}"
     
     # Third pass: Concatenate audio files for each chapter in order
     chapter_assembly_bar = tqdm(total=len(chapter_files), unit="chapter", desc="Assembling Chapters")

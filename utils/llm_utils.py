@@ -88,7 +88,7 @@ async def generate_audio_with_retry(client: AsyncOpenAI, tts_model: str, text_to
         client: The AsyncOpenAI client instance
         tts_model: The TTS model to use
         text_to_speak: The text to convert to speech
-        voice_to_speak_in: The voice to use for TTS
+        voice_to_speak_in: The voice to use for TTS (language determined by voice selection)
         max_retries: Maximum number of retry attempts
         
     Returns:
@@ -104,15 +104,18 @@ async def generate_audio_with_retry(client: AsyncOpenAI, tts_model: str, text_to
             # Create an in-memory buffer for the audio data
             audio_buffer = bytearray()
             
-            # Generate audio for the part
-            async with client.audio.speech.with_streaming_response.create(
-                model=tts_model,
-                voice=voice_to_speak_in,
-                response_format="wav",
-                speed=0.85,
-                input=text_to_speak,
-                timeout=600
-            ) as response:
+            # Generate audio for the part - build request parameters
+            request_params = {
+                "model": tts_model,
+                "voice": voice_to_speak_in,
+                "response_format": "wav",
+                "speed": 0.85,
+                "input": text_to_speak,
+                "timeout": 600
+            }
+            
+            # Note: Language is determined by voice selection, not a separate parameter for Kokoro TTS server
+            async with client.audio.speech.with_streaming_response.create(**request_params) as response:
                 async for chunk in response.iter_bytes():
                     audio_buffer.extend(chunk)
             
