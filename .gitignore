@@ -17,3 +17,4 @@ extracted_book.txt
 chapter_list.txt
 chapters.txt
 cover.jpg
+docker-compose.override.yaml
